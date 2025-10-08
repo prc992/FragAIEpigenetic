@@ -10,7 +10,7 @@
 # Carregar módulo Java
 module load java/14.0.1
 
-MODELNAME="0-Bins_400bp"
+MODELNAMEBIN="0-Bins_400bp"
 
 # Caminhos input
 CHROMHMM_JAR="/PHShome/pd004/FragAIEpigenetic/1-ChromHMM_Progressive/1-program/ChromHMM.jar"
@@ -19,7 +19,7 @@ RAW_BAMS="/PHShome/pd004/FragAIEpigenetic/1-ChromHMM_Progressive/2-raw-files-sl"
 CELLMARK="/PHShome/pd004/FragAIEpigenetic/1-ChromHMM_Progressive/3-ChromHMM-Suport-Files/cellmarkfiletable_no_stacked.txt"
 
 #Caminho output
-BINARIZED="/PHShome/pd004/FragAIEpigenetic/1-ChromHMM_Progressive/3-ChromHMM-Suport-Files/0-BINS/$MODELNAME"
+BINARIZED="/PHShome/pd004/FragAIEpigenetic/1-ChromHMM_Progressive/3-ChromHMM-Suport-Files/0-BINS/$MODELNAMEBIN"
 mkdir -p "$BINARIZED"
 
 
