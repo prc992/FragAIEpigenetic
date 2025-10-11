@@ -1,15 +1,12 @@
 #!/bin/bash
-#SBATCH --job-name=5_extract-Features-windows
-#SBATCH --array=2-8
+#SBATCH --job-name=5_V2_extract-Features-windows
+#SBATCH --array=0-5
 #SBATCH --output=logs/%x-%A_%a.out
 #SBATCH --error=logs/%x-%A_%a.err
 #SBATCH --time=5-00:00:00
 #SBATCH --mem=32G
 #SBATCH --cpus-per-task=16
 #SBATCH --mail-type=BEGIN,END,FAIL
-
-# Script unificado para extrair Coverage, GC Content e Size Features
-# para cada conjunto de estados (K=2..8), em paralelo (job array).
 
 set -euo pipefail
 export LC_ALL=C
@@ -18,36 +15,31 @@ module load bedtools
 module load samtools
 
 # ======================= Configuração =======================
-MODEL_NUM="${SLURM_ARRAY_TASK_ID}"   # número de estados (2–8)
 BIN_SIZE=400
 THREADS="${SLURM_CPUS_PER_TASK:-16}"
 
-
-# Diretórios do modelo K
+# Diretórios base
 DIR_CRAMS="/data/baca/projects/ultima_deep/2-data-samples_wgs_h19"
-DIR_BED_WINDOWS="/PHShome/pd004/FragAIEpigenetic/1-ChromHMM_Progressive/3-ChromHMM-Suport-Files/1-MODELS/0-MODEL_${MODEL_NUM}_STATES/1-WINDOWS-400BP"
-DIR_OUTPUT="/PHShome/pd004/FragAIEpigenetic/1-ChromHMM_Progressive/4-Features/MODEL_${MODEL_NUM}_STATES"
-CHECKPOINT_DIR="/PHShome/pd004/FragAIEpigenetic/1-ChromHMM_Progressive/4-Features/MODEL_${MODEL_NUM}_STATES/.checkpoints"
+DIR_MODELS_BASE="/PHShome/pd004/FragAIEpigenetic/1-ChromHMM_Progressive/3-ChromHMM-Suport-Files/1-MODELS"
+DIR_FEATURES_BASE="/PHShome/pd004/FragAIEpigenetic/1-ChromHMM_Progressive/4-Features_V2/CANONICAL"         # sem 'state'
+DIR_FEATURES_BYK_BASE="/PHShome/pd004/FragAIEpigenetic/1-ChromHMM_Progressive/4-Features_V2"               # com 'state' por K
 
+mkdir -p logs "${DIR_FEATURES_BASE}" "${DIR_FEATURES_BYK_BASE}"
 
-mkdir -p logs "${DIR_OUTPUT}" "${CHECKPOINT_DIR}"
-
-# Arquivos de referência
+# Refs
 GENOME_SIZE="/data/baca/projects/ultima_deep/6-refs/hg19.genome"
 GENOME_FASTA="/data/baca/projects/ultima_deep/6-refs/hg19.fa"
 REF="/data/baca/projects/ultima_deep/6-refs/hg19.fa"
 
 # Parâmetros para size features
-MONO_MIN=120
-MONO_MAX=180
-DI_MIN=300
-DI_MAX=380
+MONO_MIN=120; MONO_MAX=180
+DI_MIN=300;  DI_MAX=380
 PROG_DIVISOR=200
 FLUSH_EVERY=1000
 RESUME="${RESUME:-1}"
 
-# ======================= PARES CRAM x BED =======================
-# Liste aqui os CRAMs (em mesma ordem dos BEDs). Os BEDs são buscados por basename dentro de WINDOWS_DIR.
+# ======================= PARES por PACIENTE =======================
+# CRAMs (6 pacientes)
 CRAM_FILES=(
   "${DIR_CRAMS}/M2673/M2673_merge_TrimAlignSort_hg19.cram"
   "${DIR_CRAMS}/M2707/M2707_merge_TrimAlignSort_hg19.cram"
@@ -55,111 +47,87 @@ CRAM_FILES=(
   "${DIR_CRAMS}/M2560_60/M2560_60_merge_TrimAlignSort_hg19.cram"
   "${DIR_CRAMS}/M2560_120/M2560_120_merge_TrimAlignSort_hg19.cram"
   "${DIR_CRAMS}/M2671_60/M2671_60_merge_TrimAlignSort_hg19.cram"
-  # Adicione mais CRAMs, um por linha
 )
 
-# Apenas os BASENAMES dos BEDs (devem existir em cada WINDOWS_DIR de cada K)
-BED_BASENAMES=(
-  "${DIR_BED_WINDOWS}/patient1_${MODEL_NUM}_dense_sorted_400bp.bed"
-  "${DIR_BED_WINDOWS}/patient2_${MODEL_NUM}_dense_sorted_400bp.bed"
-  "${DIR_BED_WINDOWS}/patient3_${MODEL_NUM}_dense_sorted_400bp.bed"
-  "${DIR_BED_WINDOWS}/patient4_60_${MODEL_NUM}_dense_sorted_400bp.bed"
-  "${DIR_BED_WINDOWS}/patient4_120_${MODEL_NUM}_dense_sorted_400bp.bed"
-  "${DIR_BED_WINDOWS}/patient5_${MODEL_NUM}_dense_sorted_400bp.bed"
-  # Adicione mais nomes, um por linha, na mesma ordem dos CRAMs
+# BEDs CANÔNICOS (K=2) para janelas (4ª coluna nesses arquivos também é o state de K=2, mas aqui só usamos coords)
+DIR_BED_WINDOWS_K2="${DIR_MODELS_BASE}/0-MODEL_2_STATES/1-WINDOWS-400BP"
+BED_WINDOWS_K2=(
+  "${DIR_BED_WINDOWS_K2}/patient1_2_dense_sorted_400bp.bed"
+  "${DIR_BED_WINDOWS_K2}/patient2_2_dense_sorted_400bp.bed"
+  "${DIR_BED_WINDOWS_K2}/patient3_2_dense_sorted_400bp.bed"
+  "${DIR_BED_WINDOWS_K2}/patient4_60_2_dense_sorted_400bp.bed"
+  "${DIR_BED_WINDOWS_K2}/patient4_120_2_dense_sorted_400bp.bed"
+  "${DIR_BED_WINDOWS_K2}/patient5_2_dense_sorted_400bp.bed"
 )
 
-# ======================= Funções Auxiliares ======================
-fmt_time() {
-  s="${1:-0}"
-  if [ "$s" -lt 0 ] 2>/dev/null; then echo "NA"; else
-    h=$((s/3600)); m=$(((s%3600)/60)); sec=$((s%60))
-    printf "%02dh%02dm%02ds" "$h" "$m" "$sec"
-  fi
-}
+# Conjuntos de estados a rotular
+MODELS=(2 3 4 5 6 7 8)
+
+# ======================= Funções =======================
+fmt_time(){ s="${1:-0}"; h=$((s/3600)); m=$(((s%3600)/60)); sec=$((s%60)); printf "%02dh%02dm%02ds" "$h" "$m" "$sec"; }
 log_info(){ echo "[$(date '+%F %T')] [INFO] $*" >&2; }
 log_error(){ echo "[$(date '+%F %T')] [ERROR] $*" >&2; exit 1; }
 check_file(){ [[ -r "$1" ]] || log_error "$2 não encontrado/sem leitura: $1"; }
 
 # ======================= Checagens =======================
-[[ ${#CRAM_FILES[@]} -eq ${#BED_BASENAMES[@]} ]] || \
-  log_error "CRAM_FILES e BED_BASENAMES têm tamanhos diferentes."
-
+[[ ${#CRAM_FILES[@]} -eq ${#BED_WINDOWS_K2[@]} ]] || log_error "CRAM_FILES e BED_WINDOWS_K2 têm tamanhos diferentes."
 check_file "${GENOME_SIZE}" "genome size"
 check_file "${GENOME_FASTA}" "genoma FASTA"
 check_file "${REF}" "referência"
-
-# Índices se faltarem
 [[ -s "${REF}.fai" ]] || { log_info "Criando índice .fai..."; samtools faidx "${REF}"; }
-# Índices CRAI por CRAM serão conferidos no loop
+
+# ======================= Seleção (array por PACIENTE) =======================
+IDX="${SLURM_ARRAY_TASK_ID}"
+CRAM="${CRAM_FILES[$IDX]}"
+BED_CANON="${BED_WINDOWS_K2[$IDX]}"
+
+SAMPLE_NAME=$(basename "$CRAM" .cram)
+CHECKPOINT_DIR="${DIR_FEATURES_BASE}/.checkpoints_${SAMPLE_NAME}"
+mkdir -p "${CHECKPOINT_DIR}"
+
+check_file "${CRAM}" "CRAM"
+check_file "${BED_CANON}" "BED K=2"
+
+[[ -s "${CRAM}.crai" ]] || { log_info "Criando índice CRAI..."; samtools index -@ "${THREADS}" "${CRAM}"; }
 
 echo "============================================================="
-echo "🔹 Extraindo features | K=${MODEL_NUM} estados"
-echo "Windows dir: ${DIR_BED_WINDOWS}"
-echo "Saída:       ${DIR_OUTPUT}"
-echo "Threads:     ${THREADS}"
+echo "🔹 PACIENTE: ${SAMPLE_NAME}"
+echo "    CRAM          : ${CRAM}"
+echo "    BED (K=2, 400): ${BED_CANON}"
 echo "============================================================="
 
-# ======================= Loop Principal =======================
-N=${#CRAM_FILES[@]}
-for idx in $(seq 0 $((N-1))); do
-  CRAM="${CRAM_FILES[$idx]}"
-  BED="${BED_BASENAMES[$idx]}"
+START_TS=$(date +%s)
 
-  SAMPLE_NAME=$(basename "$CRAM" .cram)
+# ---------- 1) CALCULA FEATURES BASE (1x por paciente, sem 'state') ----------
+OUTPUT_COVERAGE_TMP="${CHECKPOINT_DIR}/${SAMPLE_NAME}_coverage_tmp.txt"
+OUTPUT_GC_TMP="${CHECKPOINT_DIR}/${SAMPLE_NAME}_gc_tmp.txt"
+OUTPUT_SIZE_TMP="${CHECKPOINT_DIR}/${SAMPLE_NAME}_size_tmp.txt"
+OUTPUT_FEATURES_BASE="${DIR_FEATURES_BASE}/${SAMPLE_NAME}_${BIN_SIZE}bp_FEATURES_BASE.txt"
 
-  # Saídas temporárias e final
-  OUTPUT_COVERAGE_TMP="${CHECKPOINT_DIR}/${SAMPLE_NAME}_coverage_tmp.txt"
-  OUTPUT_GC_TMP="${CHECKPOINT_DIR}/${SAMPLE_NAME}_gc_tmp.txt"
-  OUTPUT_SIZE_TMP="${CHECKPOINT_DIR}/${SAMPLE_NAME}_size_tmp.txt"
-  OUTPUT_FINAL="${DIR_OUTPUT}/${SAMPLE_NAME}_${MODEL_NUM}_STATES_${BIN_SIZE}bp_ALL_FEATURES.txt"
-
-  log_info ">>> Par $((idx+1))/$N | K=${MODEL_NUM}"
-  log_info "    CRAM: ${CRAM}"
-  log_info "    BED : ${BED}"
-  log_info "    OUT : ${OUTPUT_FINAL}"
-
-  check_file "${CRAM}" "CRAM"
-  check_file "${BED}" "BED"
-
-  # Índice CRAI
-  if [[ ! -s "${CRAM}.crai" ]]; then
-    log_info "Criando índice CRAI..."
-    samtools index -@ "${THREADS}" "${CRAM}"
-  fi
-
-  START_TS=$(date +%s)
-
-  # ======================= 1. COVERAGE =======================
-  log_info "Calculando coverage..."
+if [[ ! -s "${OUTPUT_FEATURES_BASE}" ]]; then
+  log_info "Coverage..."
   TS1=$(date +%s)
-  bedtools coverage -a "${BED}" -b "${CRAM}" -sorted -g "${GENOME_SIZE}" -counts > "${OUTPUT_COVERAGE_TMP}"
-  TS2=$(date +%s)
-  log_info "Coverage: $(fmt_time $((TS2-TS1)))"
+  bedtools coverage -a "${BED_CANON}" -b "${CRAM}" -sorted -g "${GENOME_SIZE}" -counts > "${OUTPUT_COVERAGE_TMP}"
+  TS2=$(date +%s); log_info "Coverage: $(fmt_time $((TS2-TS1)))"
 
-  # ======================= 2. GC CONTENT =======================
-  log_info "Calculando GC content..."
+  log_info "GC content..."
   TS1=$(date +%s)
-  bedtools nuc -fi "${GENOME_FASTA}" -bed "${BED}" > "${OUTPUT_GC_TMP}"
-  TS2=$(date +%s)
-  log_info "GC: $(fmt_time $((TS2-TS1)))"
+  bedtools nuc -fi "${GENOME_FASTA}" -bed "${BED_CANON}" > "${OUTPUT_GC_TMP}"
+  TS2=$(date +%s); log_info "GC: $(fmt_time $((TS2-TS1)))"
 
-  # ======================= 3. SIZE FEATURES =======================
-  log_info "Calculando size features..."
+  log_info "Size features..."
   TS1=$(date +%s)
-
   echo -e "chrom\tstart\tend\tmean_fragment_len\tsd_fragment_len\tn_reads\tmono_frac\tdi_frac\tmono_to_di_ratio\tentropy_norm_1bp\tentropy_norm_5bp\tentropy_norm_15bp\tentropy_norm_20bp" > "${OUTPUT_SIZE_TMP}"
 
-  # Cromossomos presentes nas janelas
-  mapfile -t CHRS < <(awk '!/^#/ {print $1}' "${BED}" | awk 'prev!=$0{print; prev=$0}')
-  TOTAL_WINDOWS=$(grep -vc '^#' "${BED}")
+  mapfile -t CHRS < <(awk '!/^#/ {print $1}' "${BED_CANON}" | awk 'prev!=$0{print; prev=$0}')
+  TOTAL_WINDOWS=$(grep -vc '^#' "${BED_CANON}")
   PROG_STEP=$(( TOTAL_WINDOWS / PROG_DIVISOR )); (( PROG_STEP < 1 )) && PROG_STEP=1
-
   WINDOWS_DONE=0
+
   for CHR in "${CHRS[@]}"; do
     log_info "  → chr ${CHR}"
     CHR_BED=$(mktemp)
-    awk -v C="$CHR" '!/^#/ && $1==C {print $0}' "${BED}" > "${CHR_BED}"
+    awk -v C="$CHR" '!/^#/ && $1==C {print $0}' "${BED_CANON}" > "${CHR_BED}"
     CHR_WINDOWS=$(wc -l < "${CHR_BED}")
     if (( CHR_WINDOWS == 0 )); then rm -f "${CHR_BED}"; continue; fi
 
@@ -231,35 +199,43 @@ for idx in $(seq 0 $((N-1))); do
     rm -f "${CHR_BED}"
   done
 
-  TS2=$(date +%s)
-  log_info "Size: $(fmt_time $((TS2-TS1)))"
-
-  # ======================= 4. COMBINAR TODAS AS FEATURES =======================
-  log_info "Combinando features..."
-  TS1=$(date +%s)
-
-  # Cabeçalho combinado
-  echo -e "chrom\tstart\tend\tstate\tcoverage_count\tpct_gc\tmean_fragment_len\tsd_fragment_len\tn_reads\tmono_frac\tdi_frac\tmono_to_di_ratio\tentropy_norm_1bp\tentropy_norm_5bp\tentropy_norm_15bp\tentropy_norm_20bp" > "${OUTPUT_FINAL}"
-
-  # pct_gc = coluna 6 de bedtools nuc (skip header)
-  # size features = colunas 4- fim do OUTPUT_SIZE_TMP (já com header)
+  # Combina em BASE (sem 'state')
+  echo -e "chrom\tstart\tend\tcoverage_count\tpct_gc\tmean_fragment_len\tsd_fragment_len\tn_reads\tmono_frac\tdi_frac\tmono_to_di_ratio\tentropy_norm_1bp\tentropy_norm_5bp\tentropy_norm_15bp\tentropy_norm_20bp" > "${OUTPUT_FEATURES_BASE}"
   paste "${OUTPUT_COVERAGE_TMP}" \
         <(tail -n +2 "${OUTPUT_GC_TMP}" | cut -f6) \
         <(tail -n +2 "${OUTPUT_SIZE_TMP}" | cut -f4-) \
-  | awk 'BEGIN{OFS="\t"} {print $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16}' >> "${OUTPUT_FINAL}"
+    | awk 'BEGIN{OFS="\t"}{print $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15}' >> "${OUTPUT_FEATURES_BASE}"
+else
+  log_info "Reusando FEATURES BASE: ${OUTPUT_FEATURES_BASE}"
+fi
 
-  TS2=$(date +%s)
-  log_info "Combinação: $(fmt_time $((TS2-TS1)))"
+# ---------- 2) PARA CADA K, ANEXAR A COLUNA 'state' (4ª col. do *_dense_sorted_400bp.bed) ----------
+for K in "${MODELS[@]}"; do
+  DIR_BED_WINDOWS_K="${DIR_MODELS_BASE}/0-MODEL_${K}_STATES/1-WINDOWS-400BP"
 
-  ELAP=$(( $(date +%s) - START_TS ))
-  log_info "✅ Completo em $(fmt_time "${ELAP}")"
-  log_info "📄 Arquivo final: ${OUTPUT_FINAL}"
-  log_info "👀 Preview:"
-  head -27 "${OUTPUT_FINAL}" >&2
+  # Mapear nome do BED do paciente para K correspondente (mesma convenção do K=2, só trocando o número)
+  BED_K="${BED_CANON}"
+  BED_K="${BED_K/0-MODEL_2_STATES/0-MODEL_${K}_STATES}"
+  BED_K="${BED_K/_2_dense_sorted_/_${K}_dense_sorted_}"
 
-  # Limpeza (se quiser manter para debug, comente)
-  # rm -f "${OUTPUT_COVERAGE_TMP}" "${OUTPUT_GC_TMP}" "${OUTPUT_SIZE_TMP}"
+  check_file "${BED_K}" "BED janelas K=${K}"
+  # Extrai apenas a coluna 'state' (4ª) mantendo a mesma ordem de janelas
+  STATE_COL=$(mktemp)
+  cut -f4 "${BED_K}" > "${STATE_COL}"
 
+  # Monta saída final com 'state' + features base (a partir da col 4)
+  DIR_OUT_K="${DIR_FEATURES_BYK_BASE}/MODEL_${K}_STATES"
+  mkdir -p "${DIR_OUT_K}"
+
+  OUTPUT_FINAL="${DIR_OUT_K}/${SAMPLE_NAME}_${K}_STATES_${BIN_SIZE}bp_ALL_FEATURES.txt"
+  echo -e "chrom\tstart\tend\tstate\tcoverage_count\tpct_gc\tmean_fragment_len\tsd_fragment_len\tn_reads\tmono_frac\tdi_frac\tmono_to_di_ratio\tentropy_norm_1bp\tentropy_norm_5bp\tentropy_norm_15bp\tentropy_norm_20bp" > "${OUTPUT_FINAL}"
+
+  # Junta: coords da BASE + state + resto das features
+  paste <(cut -f1-3 "${OUTPUT_FEATURES_BASE}") "${STATE_COL}" <(cut -f4- "${OUTPUT_FEATURES_BASE}") >> "${OUTPUT_FINAL}"
+  rm -f "${STATE_COL}"
+
+  log_info "✅ K=${K} -> ${OUTPUT_FINAL}"
 done
 
-log_info "🎉 Finalizado para K=${MODEL_NUM}."
+ELAP=$(( $(date +%s) - START_TS ))
+log_info "🎉 Completo para paciente ${SAMPLE_NAME} em $(fmt_time "${ELAP}")"
