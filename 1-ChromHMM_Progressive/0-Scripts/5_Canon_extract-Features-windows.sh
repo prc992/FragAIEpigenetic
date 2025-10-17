@@ -1,12 +1,13 @@
 #!/bin/bash
-#SBATCH --job-name=5_V2_extract-Features-windows
-#SBATCH --array=0-5
+#SBATCH --job-name=5_Canon_extract-Features-windows
+#SBATCH --array=0-5         # <-- ajuste aqui se tiver mais pacientes (ex.: 0-1)
 #SBATCH --output=logs/%x-%A_%a.out
 #SBATCH --error=logs/%x-%A_%a.err
-#SBATCH --time=5-00:00:00
-#SBATCH --mem=32G
-#SBATCH --cpus-per-task=16
+#SBATCH --time=2-00:00:00
+#SBATCH --mem=16G
+#SBATCH --cpus-per-task=4
 #SBATCH --mail-type=BEGIN,END,FAIL
+
 
 set -euo pipefail
 export LC_ALL=C
@@ -16,15 +17,14 @@ module load samtools
 
 # ======================= Configuração =======================
 BIN_SIZE=400
-THREADS="${SLURM_CPUS_PER_TASK:-16}"
+THREADS="${SLURM_CPUS_PER_TASK:-8}"
+
 
 # Diretórios base
 DIR_CRAMS="/data/baca/projects/ultima_deep/2-data-samples_wgs_h19"
 DIR_MODELS_BASE="/PHShome/pd004/FragAIEpigenetic/1-ChromHMM_Progressive/3-ChromHMM-Suport-Files/1-MODELS"
-DIR_FEATURES_BASE="/PHShome/pd004/FragAIEpigenetic/1-ChromHMM_Progressive/4-Features_V2/CANONICAL"         # sem 'state'
-DIR_FEATURES_BYK_BASE="/PHShome/pd004/FragAIEpigenetic/1-ChromHMM_Progressive/4-Features_V2"               # com 'state' por K
-
-mkdir -p logs "${DIR_FEATURES_BASE}" "${DIR_FEATURES_BYK_BASE}"
+DIR_FEATURES_BASE="/PHShome/pd004/FragAIEpigenetic/1-ChromHMM_Progressive/4-Features/CANONICAL"   # só canônico
+mkdir -p logs "${DIR_FEATURES_BASE}"
 
 # Refs
 GENOME_SIZE="/data/baca/projects/ultima_deep/6-refs/hg19.genome"
@@ -39,17 +39,16 @@ FLUSH_EVERY=1000
 RESUME="${RESUME:-1}"
 
 # ======================= PARES por PACIENTE =======================
-# CRAMs (6 pacientes)
 CRAM_FILES=(
   "${DIR_CRAMS}/M2673/M2673_merge_TrimAlignSort_hg19.cram"
   "${DIR_CRAMS}/M2707/M2707_merge_TrimAlignSort_hg19.cram"
   "${DIR_CRAMS}/M2594/M2594_merge_TrimAlignSort_hg19.cram"
-  "${DIR_CRAMS}/M2560_60/M2560_60_merge_TrimAlignSort_hg19.cram"
-  "${DIR_CRAMS}/M2560_120/M2560_120_merge_TrimAlignSort_hg19.cram"
-  "${DIR_CRAMS}/M2671_60/M2671_60_merge_TrimAlignSort_hg19.cram"
+  "${DIR_CRAMS}/M2560_60/M2560.60_merge_TrimAlignSort_hg19.cram"
+  "${DIR_CRAMS}/M2560_120/M2560.120_merge_TrimAlignSort_hg19.cram"
+  "${DIR_CRAMS}/M2671_120/M2671.120_merge_TrimAlignSort_hg19.cram"
+  # adicione mais CRAMs e aumente o array se necessário
 )
 
-# BEDs CANÔNICOS (K=2) para janelas (4ª coluna nesses arquivos também é o state de K=2, mas aqui só usamos coords)
 DIR_BED_WINDOWS_K2="${DIR_MODELS_BASE}/0-MODEL_2_STATES/1-WINDOWS-400BP"
 BED_WINDOWS_K2=(
   "${DIR_BED_WINDOWS_K2}/patient1_2_dense_sorted_400bp.bed"
@@ -59,9 +58,6 @@ BED_WINDOWS_K2=(
   "${DIR_BED_WINDOWS_K2}/patient4_120_2_dense_sorted_400bp.bed"
   "${DIR_BED_WINDOWS_K2}/patient5_2_dense_sorted_400bp.bed"
 )
-
-# Conjuntos de estados a rotular
-MODELS=(2 3 4 5 6 7 8)
 
 # ======================= Funções =======================
 fmt_time(){ s="${1:-0}"; h=$((s/3600)); m=$(((s%3600)/60)); sec=$((s%60)); printf "%02dh%02dm%02ds" "$h" "$m" "$sec"; }
@@ -77,7 +73,19 @@ check_file "${REF}" "referência"
 [[ -s "${REF}.fai" ]] || { log_info "Criando índice .fai..."; samtools faidx "${REF}"; }
 
 # ======================= Seleção (array por PACIENTE) =======================
-IDX="${SLURM_ARRAY_TASK_ID}"
+set +u
+if [[ -n "${SLURM_ARRAY_TASK_ID:-}" ]]; then
+  IDX="$SLURM_ARRAY_TASK_ID"
+else
+  IDX="${1:-0}"
+fi
+set -u
+
+if (( IDX >= ${#CRAM_FILES[@]} )); then
+  echo "❌ SLURM_ARRAY_TASK_ID=${IDX} fora do intervalo (0..$(( ${#CRAM_FILES[@]}-1 )))"
+  exit 1
+fi
+
 CRAM="${CRAM_FILES[$IDX]}"
 BED_CANON="${BED_WINDOWS_K2[$IDX]}"
 
@@ -107,12 +115,14 @@ OUTPUT_FEATURES_BASE="${DIR_FEATURES_BASE}/${SAMPLE_NAME}_${BIN_SIZE}bp_FEATURES
 if [[ ! -s "${OUTPUT_FEATURES_BASE}" ]]; then
   log_info "Coverage..."
   TS1=$(date +%s)
-  bedtools coverage -a "${BED_CANON}" -b "${CRAM}" -sorted -g "${GENOME_SIZE}" -counts > "${OUTPUT_COVERAGE_TMP}"
+  #bedtools coverage -a "${BED_CANON}" -b "${CRAM}" -sorted -g "${GENOME_SIZE}" -counts > "${OUTPUT_COVERAGE_TMP}"
+  bedtools coverage -a <(cut -f1-3 "${BED_CANON}") -b "${CRAM}" -sorted -g "${GENOME_SIZE}" -counts > "${OUTPUT_COVERAGE_TMP}"
   TS2=$(date +%s); log_info "Coverage: $(fmt_time $((TS2-TS1)))"
 
   log_info "GC content..."
   TS1=$(date +%s)
-  bedtools nuc -fi "${GENOME_FASTA}" -bed "${BED_CANON}" > "${OUTPUT_GC_TMP}"
+  #bedtools nuc -fi "${GENOME_FASTA}" -bed "${BED_CANON}" > "${OUTPUT_GC_TMP}"
+  bedtools nuc -fi "${GENOME_FASTA}" -bed <(cut -f1-3 "${BED_CANON}") > "${OUTPUT_GC_TMP}"
   TS2=$(date +%s); log_info "GC: $(fmt_time $((TS2-TS1)))"
 
   log_info "Size features..."
@@ -209,33 +219,5 @@ else
   log_info "Reusando FEATURES BASE: ${OUTPUT_FEATURES_BASE}"
 fi
 
-# ---------- 2) PARA CADA K, ANEXAR A COLUNA 'state' (4ª col. do *_dense_sorted_400bp.bed) ----------
-for K in "${MODELS[@]}"; do
-  DIR_BED_WINDOWS_K="${DIR_MODELS_BASE}/0-MODEL_${K}_STATES/1-WINDOWS-400BP"
-
-  # Mapear nome do BED do paciente para K correspondente (mesma convenção do K=2, só trocando o número)
-  BED_K="${BED_CANON}"
-  BED_K="${BED_K/0-MODEL_2_STATES/0-MODEL_${K}_STATES}"
-  BED_K="${BED_K/_2_dense_sorted_/_${K}_dense_sorted_}"
-
-  check_file "${BED_K}" "BED janelas K=${K}"
-  # Extrai apenas a coluna 'state' (4ª) mantendo a mesma ordem de janelas
-  STATE_COL=$(mktemp)
-  cut -f4 "${BED_K}" > "${STATE_COL}"
-
-  # Monta saída final com 'state' + features base (a partir da col 4)
-  DIR_OUT_K="${DIR_FEATURES_BYK_BASE}/MODEL_${K}_STATES"
-  mkdir -p "${DIR_OUT_K}"
-
-  OUTPUT_FINAL="${DIR_OUT_K}/${SAMPLE_NAME}_${K}_STATES_${BIN_SIZE}bp_ALL_FEATURES.txt"
-  echo -e "chrom\tstart\tend\tstate\tcoverage_count\tpct_gc\tmean_fragment_len\tsd_fragment_len\tn_reads\tmono_frac\tdi_frac\tmono_to_di_ratio\tentropy_norm_1bp\tentropy_norm_5bp\tentropy_norm_15bp\tentropy_norm_20bp" > "${OUTPUT_FINAL}"
-
-  # Junta: coords da BASE + state + resto das features
-  paste <(cut -f1-3 "${OUTPUT_FEATURES_BASE}") "${STATE_COL}" <(cut -f4- "${OUTPUT_FEATURES_BASE}") >> "${OUTPUT_FINAL}"
-  rm -f "${STATE_COL}"
-
-  log_info "✅ K=${K} -> ${OUTPUT_FINAL}"
-done
-
 ELAP=$(( $(date +%s) - START_TS ))
-log_info "🎉 Completo para paciente ${SAMPLE_NAME} em $(fmt_time "${ELAP}")"
+log_info "🎉 Canônico completo para paciente ${SAMPLE_NAME} em $(fmt_time "${ELAP}")"
