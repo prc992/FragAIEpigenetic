@@ -7,7 +7,12 @@
 #SBATCH --cpus-per-task=4
 #SBATCH --mail-type=BEGIN,END,FAIL
 
-set -euo pipefail
+set +e
+set +u
+set +o pipefail
+# (Opcional) logar cada comando para debug
+set -x
+
 export LC_ALL=C
 
 # ====== DIRETÓRIOS ======
